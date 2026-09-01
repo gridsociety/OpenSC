@@ -49,6 +49,11 @@
 
 static const char path_serial[] = "10001003";
 
+/* Actalis (ACe): the authentication certificate lives under the eSign
+ * application, at DA01/C001. */
+static const u8 itacns_esign_aid[] = {
+		0xA0, 0x00, 0x00, 0x05, 0x30, 0x45, 0x53, 0x49, 0x47, 0x4E};
+
 /* Manufacturers */
 
 const char * itacns_mask_manufacturers[] = {
@@ -793,10 +798,15 @@ static int itacns_init(sc_pkcs15_card_t *p15card)
 		int bytes;
 		sc_format_path(path_serial, &path);
 		bytes = loadFile(p15card, &path, serial, 16);
-		if (bytes < 0) return bytes;
-		if (bytes > 16) return -1;
-		serial[bytes] = '\0';
-		set_string(&p15card->tokeninfo->serial_number, (char*)serial);
+		if (bytes < 0) {
+			if (p15card->card->type != SC_CARD_TYPE_ITACNS_CNS_ACTALIS)
+				return bytes;
+		} else {
+			if (bytes > 16)
+				return -1;
+			serial[bytes] = '\0';
+			set_string(&p15card->tokeninfo->serial_number, (char *)serial);
+		}
 	}
 
 	/* Is the card a CIE v1? */
@@ -858,6 +868,18 @@ static int itacns_init(sc_pkcs15_card_t *p15card)
 	LOG_TEST_RET(p15card->card->ctx, r,
 		"Could not add CNS1");
 	certificate_count += found_certs;
+
+	/* Actalis (ACe) */
+	if (p15card->card->type == SC_CARD_TYPE_ITACNS_CNS_ACTALIS) {
+		iso7816_select_aid(p15card->card, itacns_esign_aid,
+				sizeof itacns_esign_aid, NULL, NULL);
+		r = itacns_check_and_add_keyset(p15card, "CNS0", 0x01,
+				0, "3F00DA01C001", NULL, NULL,
+				0x10, &found_certs);
+		LOG_TEST_GOTO_ERR(p15card->card->ctx, r,
+				"Could not add Actalis CNS0");
+		certificate_count += found_certs;
+	}
 
 	/* Did we find anything? */
 	if (certificate_count == 0)

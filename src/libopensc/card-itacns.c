@@ -52,13 +52,20 @@ static struct sc_card_driver itacns_drv = {
 
 /* List of ATR's for "hard" matching. */
 static const struct sc_atr_table itacns_atrs[] = {
-	{ "3b:f4:18:00:ff:81:31:80:55:00:31:80:00:c7", NULL, NULL,
-		SC_CARD_TYPE_ITACNS_CIE_V1, 0, NULL},
-	{ "3b:8b:80:01:00:31:c1:64:00:00:00:00:00:00:00:00",
-	  "ff:ff:ff:ff:ff:ff:ff:ff:00:00:00:00:00:00:00:00",
-	  "Idemia (Oberthur)", SC_CARD_TYPE_ITACNS_CNS_IDEMIA_2021, 0, NULL},
-	{ NULL, NULL, NULL, 0, 0, NULL}
+		{"3b:f4:18:00:ff:81:31:80:55:00:31:80:00:c7",				      NULL, NULL,
+			SC_CARD_TYPE_ITACNS_CIE_V1,												    0, NULL},
+		{"3b:8b:80:01:00:31:c1:64:00:00:00:00:00:00:00:00",
+			"ff:ff:ff:ff:ff:ff:ff:ff:00:00:00:00:00:00:00:00",
+			"Idemia (Oberthur)",								      SC_CARD_TYPE_ITACNS_CNS_IDEMIA_2021, 0, NULL},
+		{"3b:ff:18:00:ff:81:31:fe:4d:00:6b:04:04:b8:5b:01:f1:01:43:4e:53:10:31:80:9d",
+			"ff:ff:ff:ff:ff:ff:ff:ff:ff:ff:ff:ff:ff:00:00:00:00:00:ff:ff:ff:ff:ff:ff:00",
+			"Actalis",										SC_CARD_TYPE_ITACNS_CNS_ACTALIS,	    0, NULL},
+		{NULL,									 NULL, NULL, 0,				      0, NULL}
 };
+
+/* Actalis (ACe): its files live under the CNS card application. */
+static const u8 itacns_cns_aid[] = {
+		0xA0, 0x00, 0x00, 0x05, 0x30, 0x00, 0x0B, 0x10, 0x40, 0x01, 0x02, 0x1A};
 
 /* Macro to access private driver data. */
 #define DRVDATA(card) ((itacns_drv_data_t *) card->drv_data)
@@ -158,6 +165,10 @@ static int itacns_init(sc_card_t *card)
 	card->version.fw_major = card->reader->atr_info.hist_bytes[4];
 	card->version.fw_minor = card->reader->atr_info.hist_bytes[5];
 
+	if (card->type == SC_CARD_TYPE_ITACNS_CNS_ACTALIS)
+		iso7816_select_aid(card, itacns_cns_aid, sizeof itacns_cns_aid,
+				NULL, NULL);
+
 	/* Set up algorithm info. */
 	flags = SC_ALGORITHM_NEED_USAGE
 		| SC_ALGORITHM_RSA_RAW
@@ -165,7 +176,8 @@ static int itacns_init(sc_card_t *card)
 		;
 
 	if ((card->version.hw_major >= 1 && card->version.hw_minor >= 1) ||
-	    card->type == SC_CARD_TYPE_ITACNS_CNS_IDEMIA_2021) {
+			card->type == SC_CARD_TYPE_ITACNS_CNS_IDEMIA_2021 ||
+			card->type == SC_CARD_TYPE_ITACNS_CNS_ACTALIS) {
 		card->caps |= SC_CARD_CAP_APDU_EXT;
 		_sc_card_add_rsa_alg(card, 2048, flags, 0);
 	} else {
