@@ -350,7 +350,7 @@ static int itacns_add_pin(sc_pkcs15_card_t *p15card,
 	pin_info.attrs.pin.reference = reference;
 	pin_info.attrs.pin.flags = flags;
 	pin_info.attrs.pin.type = SC_PKCS15_PIN_TYPE_ASCII_NUMERIC;
-	pin_info.attrs.pin.min_length = 5;
+	pin_info.attrs.pin.min_length = p15card->card->type == SC_CARD_TYPE_ITACNS_CNS_ACTALIS ? 6 : 5;
 	pin_info.attrs.pin.stored_length = 8;
 	pin_info.attrs.pin.max_length = 8;
 	pin_info.attrs.pin.pad_char = 0xff;
@@ -612,6 +612,8 @@ static int itacns_add_keyset(sc_pkcs15_card_t *p15card,
 		sc_format_path(prkey_path, &path);
 		private_path = &path;
 	}
+	if (p15card->card->type == SC_CARD_TYPE_ITACNS_CNS_ACTALIS)
+		prkey_usage_flags &= SC_PKCS15_PRKEY_USAGE_SIGN | SC_PKCS15_PRKEY_USAGE_NONREPUDIATION;
 	r = itacns_add_prkey(p15card, cert_id, label, SC_PKCS15_TYPE_PRKEY_RSA,
 		modulus_len,
 		prkey_usage_flags,
@@ -624,13 +626,16 @@ static int itacns_add_keyset(sc_pkcs15_card_t *p15card,
 	strlcat(pinlabel, label, sizeof(pinlabel));
 
 	/* We are making up ID 0x90+ to link the PIN and the PUK. */
-	fake_puk_authid = 0x90 + pin_ref;
+	fake_puk_authid = p15card->card->type == SC_CARD_TYPE_ITACNS_CNS_ACTALIS ? 0 : 0x90 + pin_ref;
 	pin_flags = SC_PKCS15_PIN_FLAG_CASE_SENSITIVE
 		| SC_PKCS15_PIN_FLAG_INITIALIZED;
 	r = itacns_add_pin(p15card, pinlabel, sec_env, fake_puk_authid, pin_ref,
 	    private_path, pin_flags);
 	LOG_TEST_RET(p15card->card->ctx, r,
 		"Could not add PIN");
+
+	if (p15card->card->type == SC_CARD_TYPE_ITACNS_CNS_ACTALIS)
+		return SC_SUCCESS;
 
 	strlcpy(pinlabel, "PUK ", sizeof(pinlabel));
 	strlcat(pinlabel, label, sizeof(pinlabel));
@@ -876,9 +881,9 @@ static int itacns_init(sc_pkcs15_card_t *p15card)
 	if (p15card->card->type == SC_CARD_TYPE_ITACNS_CNS_ACTALIS) {
 		iso7816_select_aid(p15card->card, itacns_esign_aid,
 				sizeof itacns_esign_aid, NULL, NULL);
-		r = itacns_check_and_add_keyset(p15card, "CNS0", 0x01,
-				0, "3F00DA01C001", NULL, NULL,
-				0x10, &found_certs);
+		r = itacns_check_and_add_keyset(p15card, "CNS0", 0x10,
+				0, "3F00DA01C001", NULL, "3F00DA01",
+				0x81, &found_certs);
 		LOG_TEST_GOTO_ERR(p15card->card->ctx, r,
 				"Could not add Actalis CNS0");
 		certificate_count += found_certs;

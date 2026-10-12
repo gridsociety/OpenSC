@@ -66,6 +66,9 @@ static const struct sc_atr_table itacns_atrs[] = {
 static const u8 itacns_actalis_cns_aid[] = {
 		0xA0, 0x00, 0x00, 0x05, 0x30, 0x00, 0x0B, 0x10, 0x40, 0x01, 0x02, 0x1A};
 
+static const u8 itacns_actalis_esign_aid[] = {
+		0xA0, 0x00, 0x00, 0x05, 0x30, 0x45, 0x53, 0x49, 0x47, 0x4E};
+
 /* Macro to access private driver data. */
 #define DRVDATA(card) ((itacns_drv_data_t *) card->drv_data)
 
@@ -226,6 +229,9 @@ static int itacns_init(sc_card_t *card)
 		| SC_ALGORITHM_RSA_HASHES
 		;
 
+	if (card->type == SC_CARD_TYPE_ITACNS_CNS_ACTALIS)
+		flags = SC_ALGORITHM_RSA_PAD_PKCS1_TYPE_01 | SC_ALGORITHM_RSA_HASH_SHA256;
+
 	if (card->type == SC_CARD_TYPE_ITACNS_CNS_JSIGN4 ||
 			(card->version.hw_major >= 1 && card->version.hw_minor >= 1) ||
 			card->type == SC_CARD_TYPE_ITACNS_CNS_IDEMIA_2021 ||
@@ -300,6 +306,75 @@ static int itacns_restore_security_env(sc_card_t *card, int se_num)
 	SC_FUNC_RETURN(card->ctx, 1, r);
 }
 
+static int
+itacns_actalis_set_security_env(sc_card_t *card,
+		const sc_security_env_t *env)
+{
+	static const u8 hash_env[] = {0x80, 0x01, 0x40};
+	static const u8 sign_env[] = {0x80, 0x01, 0x42, 0x84, 0x01, 0x81};
+	sc_apdu_t apdu;
+	int r;
+
+	if (env->operation != SC_SEC_OPERATION_SIGN || env->algorithm != SC_ALGORITHM_RSA ||
+			env->algorithm_flags != (SC_ALGORITHM_RSA_PAD_PKCS1_TYPE_01 | SC_ALGORITHM_RSA_HASH_SHA256) ||
+			env->key_ref[0] != 0x10)
+		return SC_ERROR_NOT_SUPPORTED;
+
+	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x22, 0x41, 0xAA);
+	apdu.data = hash_env;
+	apdu.lc = apdu.datalen = sizeof hash_env;
+	r = sc_transmit_apdu(card, &apdu);
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
+	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+	LOG_TEST_RET(card->ctx, r, "Card returned error");
+
+	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x22, 0x41, 0xB6);
+	apdu.data = sign_env;
+	apdu.lc = apdu.datalen = sizeof sign_env;
+	r = sc_transmit_apdu(card, &apdu);
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
+	return sc_check_sw(card, apdu.sw1, apdu.sw2);
+}
+
+static int
+itacns_compute_signature(sc_card_t *card, const u8 *data, size_t datalen,
+		u8 *out, size_t outlen)
+{
+	sc_apdu_t apdu;
+	u8 hash[34];
+	int r;
+
+	if (card->type != SC_CARD_TYPE_ITACNS_CNS_ACTALIS)
+		return default_ops->compute_signature(card, data, datalen, out, outlen);
+
+	if (!data || datalen != 32 || !out)
+		return SC_ERROR_INVALID_ARGUMENTS;
+	if (outlen < 256)
+		return SC_ERROR_BUFFER_TOO_SMALL;
+
+	hash[0] = 0x90;
+	hash[1] = (u8)datalen;
+	memcpy(hash + 2, data, datalen);
+	sc_format_apdu(card, &apdu, SC_APDU_CASE_3_SHORT, 0x2A, 0x90, 0xA0);
+	apdu.data = hash;
+	apdu.lc = apdu.datalen = sizeof hash;
+	r = sc_transmit_apdu(card, &apdu);
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
+	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+	LOG_TEST_RET(card->ctx, r, "Card returned error");
+
+	sc_format_apdu(card, &apdu, SC_APDU_CASE_2_SHORT, 0x2A, 0x9E, 0x9A);
+	apdu.resp = out;
+	apdu.resplen = apdu.le = 256;
+	r = sc_transmit_apdu(card, &apdu);
+	LOG_TEST_RET(card->ctx, r, "APDU transmit failed");
+	r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+	LOG_TEST_RET(card->ctx, r, "Card returned error");
+	if (apdu.resplen != 256)
+		return SC_ERROR_UNKNOWN_DATA_RECEIVED;
+	return (int)apdu.resplen;
+}
+
 /*
  * Set the security context
  * Things get a little messy here. It seems you cannot do any
@@ -329,6 +404,8 @@ static int itacns_set_security_env(sc_card_t *card,
 			"No or invalid key reference\n");
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
+	if (card->type == SC_CARD_TYPE_ITACNS_CNS_ACTALIS)
+		return itacns_actalis_set_security_env(card, env);
 	key_id = env->key_ref[0];
 
 	/* CIE v1 cards need to restore security environment 0x30; all the others
@@ -407,6 +484,14 @@ itacns_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data)
 			card->type == SC_CARD_TYPE_ITACNS_CNS_JSIGN4 &&
 			data->pin_reference == 0x10)
 		return itacns_pin_get_info(card, data);
+
+	if (card->type == SC_CARD_TYPE_ITACNS_CNS_ACTALIS) {
+		data->pin1.tries_left = -1;
+		if (data->cmd != SC_PIN_CMD_VERIFY || data->pin_reference != 0x81)
+			return SC_ERROR_NOT_SUPPORTED;
+		if (!(data->flags & SC_PIN_CMD_USE_PINPAD) && (!data->pin1.data || data->pin1.len < 6 || data->pin1.len > 8))
+			return SC_ERROR_INVALID_ARGUMENTS;
+	}
 
 	data->flags |= SC_PIN_CMD_NEED_PADDING;
 	/* Enable backtracking for STIncard cards. */
@@ -536,6 +621,14 @@ static int itacns_select_file(sc_card_t *card,
 
 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
 	r = default_ops->select_file(card, in_path, file);
+	if (r == SC_ERROR_FILE_NOT_FOUND && card->type == SC_CARD_TYPE_ITACNS_CNS_ACTALIS &&
+			in_path->type == SC_PATH_TYPE_PATH && in_path->len >= 4 &&
+			memcmp(in_path->value, "\x3F\x00\xDA\x01", 4) == 0) {
+		r = iso7816_select_aid(card, itacns_actalis_esign_aid, sizeof itacns_actalis_esign_aid,
+				NULL, NULL);
+		LOG_TEST_RET(card->ctx, r, "Could not select Actalis eSign application");
+		r = default_ops->select_file(card, in_path, file);
+	}
 	if (r >= 0 && file) {
 		parse_sec_attr((*file), (*file)->sec_attr,
 			(*file)->sec_attr_len);
@@ -623,6 +716,7 @@ static struct sc_card_driver * sc_get_driver(void)
 	itacns_ops.finish = itacns_finish;
 	itacns_ops.card_reader_lock_obtained = itacns_card_reader_lock_obtained;
 	itacns_ops.set_security_env = itacns_set_security_env;
+	itacns_ops.compute_signature = itacns_compute_signature;
 	itacns_ops.restore_security_env = itacns_restore_security_env;
 	itacns_ops.pin_cmd = itacns_pin_cmd;
 	itacns_ops.read_binary = itacns_read_binary;
